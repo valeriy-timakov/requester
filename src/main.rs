@@ -23,6 +23,9 @@ fn app() -> Element {
     let mut response = use_signal(|| None::<Result<HttpResponse, String>>);
     let mut active_tab = use_signal(|| Tab::Headers);
     let mut loading = use_signal(|| false);
+    let mut save_status = use_signal(|| None::<Result<(), String>>);
+    let mut creating_new = use_signal(|| None::<PathBuf>);
+    let mut error_message = use_signal(|| None::<String>);
 
     let on_refresh_tree = move |_| {
         tree.set(storage::scan_directory());
@@ -47,9 +50,20 @@ fn app() -> Element {
 
     let on_save = move |_| {
         if let Some(path) = current_path.read().as_ref() {
-            let _ = storage::save_request(path, &current_request.read());
+            println!("Saving request to: {:?}", path);
+            match storage::save_request(path, &current_request.read()) {
+                Ok(_) => {
+                    println!("Successfully saved request to {:?}", path);
+                    save_status.set(Some(Ok(())));
+                },
+                Err(e) => {
+                    eprintln!("Failed to save request: {}", e);
+                    save_status.set(Some(Err(e.to_string())));
+                },
+            }
         } else {
-            // New file logic could be added here
+            eprintln!("Cannot save: no file selected");
+            save_status.set(Some(Err("No file selected".to_string())));
         }
     };
 
@@ -82,12 +96,18 @@ fn app() -> Element {
                             current_request.write().url = evt.value();
                         }
                     }
-                    button { 
+                    button {
                         disabled: loading(),
-                        onclick: on_send, 
+                        onclick: on_send,
                         if loading() { "Sending..." } else { "Send" }
                     }
                     button { onclick: on_save, "Save" }
+                    if let Some(status) = save_status.read().as_ref() {
+                        match status {
+                            Ok(_) => rsx! { span { style: "color: #4ec9b0; margin-left: 10px;", "✓ Saved" } },
+                            Err(e) => rsx! { span { style: "color: #f44747; margin-left: 10px;", "✗ {e}" } },
+                        }
+                    }
                 }
 
                 div { class: "tabs",
@@ -190,49 +210,52 @@ fn HeadersEditor(headers: Vec<(String, String)>, on_change: EventHandler<Vec<(St
     rsx! {
         div {
             for (i, (k, v)) in display_headers.into_iter().enumerate() {
-                // Clone Rc for the closures in this iteration
-                let headers_for_key = headers_rc.clone();
-                let headers_for_val = headers_rc.clone();
-                let headers_for_del = headers_rc.clone();
+                {
+                    let headers_for_key = headers_rc.clone();
+                    let headers_for_val = headers_rc.clone();
+                    let headers_for_del = headers_rc.clone();
 
-                div { class: "header-row", key: "{i}",
-                    input {
-                        r#type: "text",
-                        placeholder: "Key",
-                        value: "{k}",
-                        oninput: move |evt| {
-                            let mut new_headers = headers_for_key.as_ref().clone();
-                            if i < new_headers.len() {
-                                new_headers[i].0 = evt.value();
-                            } else {
-                                new_headers.push((evt.value(), "".to_string()));
+                    rsx! {
+                        div { class: "header-row", key: "{i}",
+                            input {
+                                r#type: "text",
+                                placeholder: "Key",
+                                value: "{k}",
+                                oninput: move |evt| {
+                                    let mut new_headers = headers_for_key.as_ref().clone();
+                                    if i < new_headers.len() {
+                                        new_headers[i].0 = evt.value();
+                                    } else {
+                                        new_headers.push((evt.value(), "".to_string()));
+                                    }
+                                    on_change.call(new_headers);
+                                }
                             }
-                            on_change.call(new_headers);
+                            input {
+                                r#type: "text",
+                                placeholder: "Value",
+                                value: "{v}",
+                                oninput: move |evt| {
+                                    let mut new_headers = headers_for_val.as_ref().clone();
+                                    if i < new_headers.len() {
+                                        new_headers[i].1 = evt.value();
+                                    } else {
+                                        new_headers.push(("".to_string(), evt.value()));
+                                    }
+                                    on_change.call(new_headers);
+                                }
+                            }
+                            button {
+                                onclick: move |_| {
+                                    let mut new_headers = headers_for_del.as_ref().clone();
+                                    if i < new_headers.len() {
+                                        new_headers.remove(i);
+                                        on_change.call(new_headers);
+                                    }
+                                },
+                                "✕"
+                            }
                         }
-                    }
-                    input {
-                        r#type: "text",
-                        placeholder: "Value",
-                        value: "{v}",
-                        oninput: move |evt| {
-                            let mut new_headers = headers_for_val.as_ref().clone();
-                            if i < new_headers.len() {
-                                new_headers[i].1 = evt.value();
-                            } else {
-                                new_headers.push(("".to_string(), evt.value()));
-                            }
-                            on_change.call(new_headers);
-                        }
-                    }
-                    button {
-                        onclick: move |_| {
-                            let mut new_headers = headers_for_del.as_ref().clone();
-                            if i < new_headers.len() {
-                                new_headers.remove(i);
-                                on_change.call(new_headers);
-                            }
-                        },
-                        "✕"
                     }
                 }
             }
