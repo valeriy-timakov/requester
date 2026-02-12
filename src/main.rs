@@ -26,15 +26,30 @@ fn app() -> Element {
     let mut save_status = use_signal(|| None::<Result<(), String>>);
     let mut creating_new = use_signal(|| None::<PathBuf>);
     let mut error_message = use_signal(|| None::<String>);
+    let mut content_type = use_signal(|| String::new());
 
     let on_refresh_tree = move |_| {
         tree.set(storage::scan_directory());
     };
 
     let on_select_file = move |path: PathBuf| {
-        if let Ok(req) = storage::load_request(&path) {
-            current_request.set(req);
-            current_path.set(Some(path));
+        println!("Loading request from: {:?}", path);
+        match storage::load_request(&path) {
+            Ok(req) => {
+                println!("Successfully loaded request from {:?}", path);
+                // Extract Content-Type from headers if present
+                let ct = req.headers.iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or_default();
+                content_type.set(ct);
+                current_request.set(req);
+                current_path.set(Some(path));
+                save_status.set(None);
+            },
+            Err(e) => {
+                eprintln!("Failed to load request from {:?}: {}", path, e);
+            }
         }
     };
 
@@ -42,7 +57,12 @@ fn app() -> Element {
         spawn(async move {
             loading.set(true);
             let req = current_request.read().clone();
+            println!("Sending {} request to {}", req.method, req.url);
             let res = execute_request(&req).await;
+            match &res {
+                Ok(resp) => println!("Response received: {} {}", resp.status, resp.status_text),
+                Err(e) => eprintln!("Request failed: {}", e),
+            }
             response.set(Some(res));
             loading.set(false);
         });
@@ -67,13 +87,93 @@ fn app() -> Element {
         }
     };
 
+    let on_new_request = move |parent_path: Option<PathBuf>| {
+        let target_path = parent_path.unwrap_or_else(|| storage::get_base_dir());
+        println!("Creating new request in: {:?}", target_path);
+        creating_new.set(Some(target_path));
+    };
+
+    let on_create_file = move |(parent_path, filename): (PathBuf, String)| {
+        let file_path = parent_path.join(format!("{}.req", filename));
+        println!("Attempting to create file: {:?}", file_path);
+
+        if file_path.exists() {
+            eprintln!("File already exists: {:?}", file_path);
+            error_message.set(Some(format!("File '{}' already exists", filename)));
+            return;
+        }
+
+        match storage::save_request(&file_path, &RequestData::new()) {
+            Ok(_) => {
+                println!("Successfully created new request: {:?}", file_path);
+                creating_new.set(None);
+                error_message.set(None);
+                tree.set(storage::scan_directory());
+                current_request.set(RequestData::new());
+                current_path.set(Some(file_path));
+                save_status.set(None);
+            },
+            Err(e) => {
+                eprintln!("Failed to create file: {}", e);
+                error_message.set(Some(format!("Failed to create file: {}", e)));
+            }
+        }
+    };
+
+    let on_cancel_new = move |_| {
+        creating_new.set(None);
+    };
+
+    let mut on_content_type_change = move |new_type: String| {
+        content_type.set(new_type.clone());
+
+        // Update Content-Type header
+        let mut headers = current_request.read().headers.clone();
+
+        // Remove existing Content-Type header
+        headers.retain(|(k, _)| !k.eq_ignore_ascii_case("content-type"));
+
+        // Add new Content-Type if not empty
+        if !new_type.is_empty() {
+            headers.push(("Content-Type".to_string(), new_type));
+        }
+
+        current_request.write().headers = headers;
+    };
+
     rsx! {
         style { {include_str!("style.css")} }
         div { id: "main",
             div { class: "sidebar",
                 h3 { "Requests" }
                 button { onclick: on_refresh_tree, "Refresh" }
-                Sidebar { node: tree.read().clone(), on_select: on_select_file, current_path: current_path.read().clone() }
+                Sidebar {
+                    node: tree.read().clone(),
+                    on_select: on_select_file,
+                    current_path: current_path.read().clone(),
+                    on_new_request: on_new_request,
+                    creating_new: creating_new.read().clone(),
+                    on_create_file: on_create_file,
+                    on_cancel_new: on_cancel_new
+                }
+                if let Some(err) = error_message.read().as_ref() {
+                    div {
+                        class: "error-dialog",
+                        style: "position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); background: #1e1e1e; border: 2px solid #f44747; padding: 20px; border-radius: 5px; z-index: 1000;",
+                        div { style: "color: #f44747; margin-bottom: 10px;", "{err}" }
+                        button {
+                            onclick: move |_| error_message.set(None),
+                            "OK"
+                        }
+                    }
+                }
+                if error_message.read().is_some() {
+                    div {
+                        class: "overlay",
+                        style: "position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); z-index: 999;",
+                        onclick: move |_| error_message.set(None)
+                    }
+                }
             }
             div { class: "content",
                 div { class: "address-bar",
@@ -134,11 +234,31 @@ fn app() -> Element {
                             }
                         },
                         Tab::Body => rsx! {
-                            textarea {
-                                class: "body-editor",
-                                value: "{current_request.read().body}",
-                                oninput: move |evt| {
-                                    current_request.write().body = evt.value();
+                            div { style: "display: flex; flex-direction: column; height: 100%;",
+                                div { style: "margin-bottom: 10px; display: flex; align-items: center;",
+                                    label { style: "margin-right: 10px; color: #cccccc;", "Content-Type:" }
+                                    select {
+                                        value: "{content_type()}",
+                                        onchange: move |evt| {
+                                            on_content_type_change(evt.value());
+                                        },
+                                        style: "padding: 5px; background: #3c3c3c; color: #cccccc; border: 1px solid #3e3e3e; border-radius: 3px;",
+                                        option { value: "", "None" }
+                                        option { value: "application/json", "application/json" }
+                                        option { value: "application/xml", "application/xml" }
+                                        option { value: "application/x-www-form-urlencoded", "application/x-www-form-urlencoded" }
+                                        option { value: "text/plain", "text/plain" }
+                                        option { value: "text/html", "text/html" }
+                                        option { value: "multipart/form-data", "multipart/form-data" }
+                                    }
+                                }
+                                textarea {
+                                    class: "body-editor",
+                                    style: "flex: 1;",
+                                    value: "{current_request.read().body}",
+                                    oninput: move |evt| {
+                                        current_request.write().body = evt.value();
+                                    }
                                 }
                             }
                         }
@@ -166,19 +286,74 @@ fn app() -> Element {
 }
 
 #[component]
-fn Sidebar(node: FileNode, on_select: EventHandler<PathBuf>, current_path: Option<PathBuf>) -> Element {
+fn Sidebar(
+    node: FileNode,
+    on_select: EventHandler<PathBuf>,
+    current_path: Option<PathBuf>,
+    on_new_request: EventHandler<Option<PathBuf>>,
+    creating_new: Option<PathBuf>,
+    on_create_file: EventHandler<(PathBuf, String)>,
+    on_cancel_new: EventHandler<()>
+) -> Element {
+    let mut show_context_menu = use_signal(|| false);
+    let mut context_menu_pos = use_signal(|| (0.0, 0.0));
+
     match node {
-        FileNode::Folder { name, children, .. } => {
+        FileNode::Folder { name, children, path } => {
+            let path_for_menu = path.clone();
+            let path_for_new = path.clone();
+            let is_creating_here = creating_new.as_ref().map_or(false, |p| p == &path);
+
             rsx! {
                 div { class: "tree-node",
-                    div { class: "folder-node", "📁 {name}" }
+                    div {
+                        class: "folder-node",
+                        oncontextmenu: move |evt| {
+                            evt.prevent_default();
+                            context_menu_pos.set((evt.client_coordinates().x, evt.client_coordinates().y));
+                            show_context_menu.set(true);
+                        },
+                        "📁 {name}"
+                    }
                     div { style: "margin-left: 10px",
-                        for child in children {
-                            Sidebar { 
-                                node: child.clone(), 
-                                on_select: move |p| on_select.call(p),
-                                current_path: current_path.clone()
+                        if is_creating_here {
+                            NewFileEditor {
+                                parent_path: path_for_new.clone(),
+                                on_create: on_create_file,
+                                on_cancel: on_cancel_new
                             }
+                        }
+                        for child in children {
+                            Sidebar {
+                                node: child.clone(),
+                                on_select: move |p| on_select.call(p),
+                                current_path: current_path.clone(),
+                                on_new_request: move |p| on_new_request.call(p),
+                                creating_new: creating_new.clone(),
+                                on_create_file: move |(p, n)| on_create_file.call((p, n)),
+                                on_cancel_new: move |()| on_cancel_new.call(())
+                            }
+                        }
+                    }
+                    if show_context_menu() {
+                        div {
+                            class: "context-menu",
+                            style: "position: fixed; left: {context_menu_pos().0}px; top: {context_menu_pos().1}px; background: #2d2d2d; border: 1px solid #3e3e3e; border-radius: 3px; padding: 5px 0; z-index: 1000; box-shadow: 0 2px 8px rgba(0,0,0,0.3);",
+                            onmouseleave: move |_| show_context_menu.set(false),
+                            div {
+                                class: "context-menu-item",
+                                style: "padding: 8px 20px; cursor: pointer; color: #cccccc;",
+                                onclick: move |_| {
+                                    show_context_menu.set(false);
+                                    on_new_request.call(Some(path_for_menu.clone()));
+                                },
+                                "New Request"
+                            }
+                        }
+                        div {
+                            class: "overlay",
+                            style: "position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 999;",
+                            onclick: move |_| show_context_menu.set(false)
                         }
                     }
                 }
@@ -187,11 +362,68 @@ fn Sidebar(node: FileNode, on_select: EventHandler<PathBuf>, current_path: Optio
         FileNode::File { name, path } => {
             let is_selected = current_path.map_or(false, |p| p == path);
             rsx! {
-                div { 
+                div {
                     class: if is_selected { "file-node selected" } else { "file-node" },
                     onclick: move |_| on_select.call(path.clone()),
-                    "📄 {name}" 
+                    "📄 {name}"
                 }
+            }
+        }
+    }
+}
+
+#[component]
+fn NewFileEditor(
+    parent_path: PathBuf,
+    on_create: EventHandler<(PathBuf, String)>,
+    on_cancel: EventHandler<()>
+) -> Element {
+    let mut filename = use_signal(|| String::new());
+    let parent_path_rc = std::rc::Rc::new(parent_path);
+
+    rsx! {
+        div {
+            class: "file-node editing",
+            style: "display: flex; align-items: center; padding: 2px 0;",
+            "📄 "
+            input {
+                r#type: "text",
+                placeholder: "filename",
+                value: "{filename()}",
+                style: "flex: 1; background: #3c3c3c; color: #cccccc; border: 1px solid #007acc; padding: 2px 5px; font-size: 13px;",
+                autofocus: true,
+                oninput: move |evt| filename.set(evt.value()),
+                onkeydown: {
+                    let parent_path_for_key = parent_path_rc.clone();
+                    move |evt| {
+                        if evt.key() == Key::Enter {
+                            let name = filename().trim().to_string();
+                            if !name.is_empty() {
+                                on_create.call(((*parent_path_for_key).clone(), name));
+                            }
+                        } else if evt.key() == Key::Escape {
+                            on_cancel.call(());
+                        }
+                    }
+                }
+            }
+            button {
+                style: "margin-left: 5px; padding: 2px 8px; background: #0e639c; border: none; color: white; cursor: pointer; font-size: 11px;",
+                onclick: {
+                    let parent_path_for_btn = parent_path_rc.clone();
+                    move |_| {
+                        let name = filename().trim().to_string();
+                        if !name.is_empty() {
+                            on_create.call(((*parent_path_for_btn).clone(), name));
+                        }
+                    }
+                },
+                "✓"
+            }
+            button {
+                style: "margin-left: 2px; padding: 2px 8px; background: #5a5a5a; border: none; color: white; cursor: pointer; font-size: 11px;",
+                onclick: move |_| on_cancel.call(()),
+                "✕"
             }
         }
     }
@@ -214,6 +446,7 @@ fn HeadersEditor(headers: Vec<(String, String)>, on_change: EventHandler<Vec<(St
                     let headers_for_key = headers_rc.clone();
                     let headers_for_val = headers_rc.clone();
                     let headers_for_del = headers_rc.clone();
+                    let is_content_type = k.eq_ignore_ascii_case("content-type");
 
                     rsx! {
                         div { class: "header-row", key: "{i}",
@@ -221,6 +454,8 @@ fn HeadersEditor(headers: Vec<(String, String)>, on_change: EventHandler<Vec<(St
                                 r#type: "text",
                                 placeholder: "Key",
                                 value: "{k}",
+                                readonly: is_content_type,
+                                style: if is_content_type { "background: #2d2d2d; color: #858585;" } else { "" },
                                 oninput: move |evt| {
                                     let mut new_headers = headers_for_key.as_ref().clone();
                                     if i < new_headers.len() {
@@ -235,6 +470,8 @@ fn HeadersEditor(headers: Vec<(String, String)>, on_change: EventHandler<Vec<(St
                                 r#type: "text",
                                 placeholder: "Value",
                                 value: "{v}",
+                                readonly: is_content_type,
+                                style: if is_content_type { "background: #2d2d2d; color: #858585;" } else { "" },
                                 oninput: move |evt| {
                                     let mut new_headers = headers_for_val.as_ref().clone();
                                     if i < new_headers.len() {
@@ -246,6 +483,8 @@ fn HeadersEditor(headers: Vec<(String, String)>, on_change: EventHandler<Vec<(St
                                 }
                             }
                             button {
+                                disabled: is_content_type,
+                                style: if is_content_type { "opacity: 0.3; cursor: not-allowed;" } else { "" },
                                 onclick: move |_| {
                                     let mut new_headers = headers_for_del.as_ref().clone();
                                     if i < new_headers.len() {
