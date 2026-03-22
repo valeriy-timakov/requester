@@ -57,12 +57,7 @@ fn app() -> Element {
         spawn(async move {
             loading.set(true);
             let req = current_request.read().clone();
-            println!("Sending {} request to {}", req.method, req.url);
             let res = execute_request(&req).await;
-            match &res {
-                Ok(resp) => println!("Response received: {} {}", resp.status, resp.status_text),
-                Err(e) => eprintln!("Request failed: {}", e),
-            }
             response.set(Some(res));
             loading.set(false);
         });
@@ -361,11 +356,12 @@ fn Sidebar(
         }
         FileNode::File { name, path } => {
             let is_selected = current_path.map_or(false, |p| p == path);
+            let display_name = name.strip_suffix(".req").unwrap_or(&name);
             rsx! {
                 div {
                     class: if is_selected { "file-node selected" } else { "file-node" },
                     onclick: move |_| on_select.call(path.clone()),
-                    "📄 {name}"
+                    "📄 {display_name}"
                 }
             }
         }

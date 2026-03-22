@@ -40,6 +40,7 @@ body, html {
     border: 1px solid #444;
     padding: 8px;
     border-radius: 4px;
+    font-size: 16px;
 }
 
 .address-bar input {
@@ -49,6 +50,7 @@ body, html {
     border: 1px solid #444;
     padding: 8px;
     border-radius: 4px;
+    font-size: 16px;
 }
 
 .address-bar button {
@@ -58,6 +60,7 @@ body, html {
     padding: 8px 16px;
     border-radius: 4px;
     cursor: pointer;
+    font-size: 16px;
 }
 
 .address-bar button:hover {
@@ -86,6 +89,7 @@ body, html {
     display: flex;
     flex-direction: column;
     margin-bottom: 20px;
+    font-size: 12px;
 }
 
 .header-row {
@@ -111,6 +115,7 @@ body, html {
     padding: 10px;
     font-family: monospace;
     resize: vertical;
+    font-size: 12px;
 }
 
 .result-area {
@@ -120,6 +125,7 @@ body, html {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    font-size: 12px;
 }
 
 .result-header {
@@ -133,13 +139,17 @@ body, html {
     padding: 10px;
     border: 1px solid #333;
     font-family: monospace;
+    font-size: 14px;
     white-space: pre-wrap;
     overflow-x: auto;
     flex: 1;
+    max-width: 100%;
+    box-sizing: border-box;
 }
 
 .tree-node {
     padding: 4px;
+    font-size: 12px;
 }
 
 .folder-node {
